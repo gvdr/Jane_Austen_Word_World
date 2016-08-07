@@ -1,0 +1,288 @@
+---
+title: "Jane Austen's word world"
+author: "Giulio V. Dalla Riva"
+output: 
+  html_document: 
+    highlight: zenburn
+    keep_md: yes
+    number_sections: yes
+    theme: cerulean
+    toc: yes
+---
+
+# Sense and Pragma
+
+```{r setup, include=FALSE}
+options(stringsAsFactors = FALSE)
+```
+
+Words are important, and it is important how we use them. The Italian-speaking reader can refer to [Nanni Moretti](https://www.youtube.com/watch?v=qtP3FWRo6Ow), the others have to take my word for granted. In particular, when we choose to use a certain word together with other words to form a phrase, we are contributing to define the meaning of all those words. And, by contrast, of all the words _not_ in that phrase.
+
+# Preliminaries
+
+I built heavily on Julia Silge [vignette](http://juliasilge.com/blog/Life-Changing-Magic/) on the wonderful package `tidytext` and I owe much to [Andrew MacDonald](https://twitter.com/polesasunder) wise use of `tidyr` and `purrr`.
+
+We'll need a the usual standard libraries to work in the _tidy-verse_.
+
+```{r, warning=FALSE, message=FALSE}
+library(magrittr)
+library(janeaustenr)
+library(tidytext)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(widyr)
+library(purrr)
+library(ggplot2)
+```
+
+# Gather corpus
+
+## Collecting the novels
+
+We get all the novels from Jane Austen, as provided by Julia Silge wonderfully cute library `janeaustenr`, and we group them by `book`.
+
+```{r, cache=T}
+corpus_austen <- austen_books() %>%
+  group_by(book)
+```
+
+Following Silge's vignette, we subdivide each novel by chapter thanks to their heading: `stringr::str_detect()` allows us to detect a regular expression in the text.
+
+```{r, cache=T}
+corpus_austen %<>%
+  mutate(chapter = text %>%
+           str_detect(regex("^chapter [\\divxlc]",
+                            ignore_case = T)) %>%
+           cumsum())
+```
+
+We finalize the collection of the corpus collapsing all the text lines of each chapter in a coherent string array.
+
+```{r, cache=T}
+corpus_austen %<>%
+  group_by(chapter, add = T) %>%
+  summarise(chapter_full_text = str_c(text,collapse = " "))
+```
+
+## Cleaning the text
+
+We clean the collapsed chapters using an ad hoc function, `vaniller()`, that can be found in `R/functions.R` (see there for more details).
+
+```{r, cache=T}
+source("../R/functions.R")
+```
+
+Underneath `vaniller()` there is a series of call to `stringr` functions matching certain regular expressions and removing them from the collapsed text: these include fancy characters, all those _ms._ and _mr._ that will create confusion when dividing the text into phrases, chapter headings and so on. Cleaning a text, I am discovering, is an art more than a science: `vaniller()` is still work in progress, and it is heavily depending on the language (English) of the corpus, the style of the writer, and so forth.
+
+```{r, cache=T}
+corpus_austen %<>%
+  mutate(chapter_full_text = chapter_full_text %>% vaniller()) %>%
+  ungroup()
+```
+
+# Compute cooccurences
+
+The next series of steps builds the networks of word-word cooccurrences in the books phrase. For each pair of words in a _narrative unit_---e.g., books or book chapters---we count how many phrases contain both the words. The product of this process can be expressed as a square matrix: each word in a Jane Austen's narrative unit is represented as a row and a column; the matrix entry _ij_ is an integer counting the number of cooccurrances of words _i_ and _j_, eventually 0 if _i_ and _j_ never occurred together.
+
+In this vignette, we adopt two narrative units: books and chapters. Accordingly we group our data frame by `book` or by `book` and `chapter`:
+
+```{r, cache=T}
+word_cooccurences_book <- corpus_austen %>%
+  select(-chapter) %>%
+  group_by(book)
+
+word_cooccurences_chapter <- corpus_austen %>%
+  group_by(book,chapter)
+```
+
+We focus on the first case, where the narrative units are books. The second case is essentiall the same. First of all, we split the chapters in phrases and produce a nested data frame. To form the phrase, we split the text each time we find a "?", ".", ";", or "!". Are we forgetting anything?
+
+We use `dplyr::do()` to call `stringr::str_split()` on each chapter text, `dplyr::mutate()` adds an index to the phrases (which will be handy to perform the wording) and, following Andrew suggestion, we keep everything together creating a nested data frame with `tidyr::nest()`.
+
+```{r, cache=T}
+word_cooccurences_book %<>%
+  phraser("chapter_full_text")
+
+word_cooccurences_book
+```
+
+Well, that looks like a strange data frame, what are those tibbles?. Let's see what's in `$data`:
+
+```{r, cache=T}
+word_cooccurences_book %>%
+  filter(book %in% "Sense & Sensibility") %>%
+  select(data) %>%
+  unnest()
+```
+
+That's our _Sense & Sensibility_, split by phrase. Wonderful! Now let's further split our phrases into single words. The two step was necessary because we need to keep track of the phrase those words come from.
+
+```{r, cache=T}
+word_cooccurences_book %<>%
+  wordr()
+
+word_cooccurences_book %>%
+  filter(book %in% "Sense & Sensibility") %>%
+  select(data) %>%
+  unnest()
+```
+
+And finally we use `widyr::pairwise_count()` to count pair of words within phrases, grouped by book.
+
+```{r, cache=T}
+word_cooccurences_book %<>%
+  cooccurrence_counter()
+
+word_cooccurences_book
+```
+
+Well, that's a cute little tibble, but it contains some serious long table. Let's take a look at one example:
+
+```{r, cache=T}
+word_cooccurences_book %>%
+  filter(book %in% "Emma") %>%
+  unnest()
+```
+
+Not completely interesting, the first rows contains mostly articles and prepositions. We will address that later on. For the moment, let's do the same for the other choice of narrative unit, chapters. It will be sensibly faster, as the units are smaller (or that's what I think).
+
+```{r, cache=T}
+word_cooccurences_chapter %<>%
+  phraser("chapter_full_text") %>%
+  wordr() %>%
+  cooccurrence_counter()
+
+word_cooccurences_chapter %>%
+  filter(book %in% "Emma", chapter %in% 4) %>%
+  unnest()
+```
+
+Notice that we took a slight detour from the usual Latent Semantic Analysis, as in LSA it is the norm to code cooccurrances in a matrix with rows corresponding to words and columns to documents (or subunits of documents) in which they appear.
+
+# Compute word traits
+
+Now that we have this network representation of Jane Austen's novels, we can fit a Random Dot Product Graph via `traits_ww()`.
+
+```{r, cache=T}
+word_spaces_chapters <- word_cooccurences_chapter %>%
+  mutate(traits = map(pw_n, ~.x %>% traits_ww(3,"RSpectra"))) %>%
+  select(-pw_n)
+
+word_spaces_chapters %<>%
+  unnest()
+```
+
+Let's get a look at one sample:
+
+```{r, cache=T}
+word_spaces_chapters %>%
+  filter(book %in% "Sense & Sensibility", chapter %in% 1)
+```
+
+As we saw, the most used words---or, to be precise, the first lems in terms of number of occurrances---may be not the most informative about Jane Austen novels. Thus, let us define a set of boring words (they are not _really_ boring, 'though!). `Tidytext` offers a list of stop words, which is very close to what we need. We can increase it with some _ad hoc_ words and then use `SnowballC` to stem those words.
+
+```{r, cache=T}
+stop_words_personal <- data_frame(
+  word = c("sir", "mister", "miss", "lady",
+           "colonel", "captain"),
+  lexicon = "personal") %>%
+  bind_rows(stop_words)
+
+stop_words_personal %<>% mutate(
+  word = SnowballC::wordStem(word)
+  )
+```
+
+We can use our list of boring words to show a more interesting subset of lems. A call to `dplyr::anti_join()` will return only those `label`s in `word_space_chapters` that are not `word`s in the boring list.
+
+```{r, cache=T}
+word_spaces_chapters %>%
+  filter(book %in% "Sense & Sensibility", chapter %in% 1) %>%
+  anti_join(stop_words_personal, by = c("label" = "word"))
+```
+
+Now we are almost done: we have the position of each stem in each chapter's word world. Two stem in similar position have been used similarly by Jane Austen in that chapter.
+
+```{r, cache=T}
+word_spaces_chapters %<>%
+  mutate(magnitude = sqrt(trait.1^2 + trait.2^2 + trait.3^2))
+```
+
+```{r, cache=T}
+word_spaces_chapters %>%
+  filter(book %in% "Sense & Sensibility", chapter %in% 2) %>%
+  anti_join(stop_words_personal, by = c("label" = "word")) %>%
+  arrange(-magnitude)
+```
+
+And we do the same for the books as narrative units. This will take a long time (at least on my laptop). Consider sampling a subset of cooccurrances instead of them all.
+
+```{r, cache=T}
+word_spaces_books <- word_cooccurences_book %>%
+  mutate(traits = map(pw_n, ~.x %>% traits_ww(3,"RSpectra"))) %>%
+  select(-pw_n) %>%
+  unnest() %>%
+  mutate(magnitude = sqrt(trait.1^2 + trait.2^2 + trait.3^2))
+```
+
+Let's take a look:
+
+```{r, cache=T}
+word_spaces_books %>%
+  filter(book %in% "Sense & Sensibility") %>%
+  anti_join(stop_words_personal, by = c("label" = "word")) %>%
+  arrange(-magnitude)
+```
+
+## Plot the word world
+
+Now that we have all the data, we are ready for some visualization. Indeed, the advantage of having a low dimensional geometric representation of the complex network of the word-word cooccurances is excatly that: we can rely on the proximity of words in the trait space to elicit information.
+
+Let's start with a basic scatter plot of the first 10 words by trait magnitude.
+
+```{r, cache=T}
+word_spaces_books %>%
+  filter(book %in% "Sense & Sensibility") %>%
+  anti_join(stop_words_personal, by = c("label" = "word")) %>%
+  arrange(-magnitude) %>%
+  slice(seq.int(1,10)) %>%
+  ggplot(aes(x = trait.1, y = trait.2)) +
+  geom_point()
+```
+
+Mmm, yeah, ok. Nice dots. But what do they stand for? Here comes `ggrepel`  to the help! And, as things are starting to get long, let's wrap the plotting functions in an ad hoc file (`R/plotting_foos.R`, let's give a look there if you are interested in the details).
+
+```{r, cache=F}
+source("../R/plotting_foos.R")
+```
+
+```{r, cache=T}
+word_spaces_books %>%
+   plot_traits("Sense & Sensibility", 15)
+```
+
+This looks better. We can identify some interesting information. _Elinor_ and _Marianne_---which becomes `mariann` after stemming---are two major charaters and, from the fact that their position is dissimilar, we can venture to say that the use of _Elinor_ and _Marianne_ in _Sense and Sensibility_ is dissimilar, cooccurance wise. So, are the two character dissimilar in the novel? We left the reader to judge.
+
+Let's take an overview look at all the novels:
+
+```{r, cache=T}
+word_spaces_books %>%
+  plot_traits_allbooks(10)
+```
+
+We can see many characters. Although I never read a Jane Austen novel (never happened, maybe I will after all), it seems to me that _sisters_---and family in general---, _time_ and _feelings_ are important themes for Austen.
+
+# The word world changes
+
+Now that we have computed the semantic spaces (_yeah, that's fancier than word worlds_) for each chapter, we can see how the use of words changes across a novel.
+
+Let's give a look at "Persuasion" (one of the novel with less chapters):
+
+```{r, cache=T}
+word_spaces_chapters %>%
+  filter(chapter != 0) %>%
+  plot_traits_allchapters("Persuasion",4)
+```
+
+Walter seems to dominate the first chapters, while Russel the latters. In the second chapter a _bath_ appears, in the seventh a _child_. We could go more in the deep, but there is caveat to be made. A word's absolute position in the word world---estimated through RDPG---is not, in general, meaningful. In fact, the Singular Value Decomposition is not unique (orthogonal transformations would leave the dot products untouched, and so we can't distinguish between them). Yet, _distances_ **are** preserved. We'll see how to make use of it in the next post.

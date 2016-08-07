@@ -1,0 +1,14 @@
+base
+magrittr
+janeaustenr
+tidytext
+dplyr
+stringr
+tidyr
+widyr
+purrr
+ggplot2
+Matrix
+gridExtra
+ggrepel
+viridis
